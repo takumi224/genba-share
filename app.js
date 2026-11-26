@@ -71,6 +71,11 @@
     if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
     return (n / 1024 / 1024).toFixed(1) + ' MB';
   }
+  function sha256hex(s) {
+    return crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)).then(function (buf) {
+      return Array.prototype.map.call(new Uint8Array(buf), function (x) { return x.toString(16).padStart(2, '0'); }).join('');
+    });
+  }
   function newId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
   function today0() { var d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
   function daysBetween(a, b) { return Math.round((b - a) / DAY); }
@@ -100,6 +105,7 @@
       'auth/wrong-password': wrong,
       'auth/user-not-found': wrong,
       'auth/email-already-in-use': 'このメールアドレスはすでに登録されています。',
+      'admin-key-wrong': '管理者パスワードが違います。一般の方は「管理者パスワード」を空欄にしてください。',
       'auth/invalid-email': 'メールアドレスの形式が正しくありません。',
       'auth/weak-password': 'パスワードは6文字以上にしてください。',
       'auth/missing-password': 'パスワードを入力してください。',
@@ -141,10 +147,19 @@
             return A.onAuthStateChanged(auth, function (u) { cb(u ? { uid: u.uid, email: u.email } : null); });
           },
           login: function (email, pw) { return A.signInWithEmailAndPassword(auth, email.trim(), pw); },
-          register: function (name, email, pw) {
-            return A.createUserWithEmailAndPassword(auth, email.trim(), pw).then(function (c) {
-              return F.setDoc(F.doc(db, 'users', c.user.uid), {
-                name: name, email: c.user.email, status: 'pending', role: 'user', createdAt: F.serverTimestamp()
+          register: function (name, email, pw, adminPw) {
+            var keyP = adminPw ? sha256hex(adminPw) : Promise.resolve('');
+            return keyP.then(function (key) {
+              return A.createUserWithEmailAndPassword(auth, email.trim(), pw).then(function (c) {
+                var d = key
+                  ? { name: name, email: c.user.email, status: 'approved', role: 'admin', adminKey: key, createdAt: F.serverTimestamp() }
+                  : { name: name, email: c.user.email, status: 'pending', role: 'user', createdAt: F.serverTimestamp() };
+                return F.setDoc(F.doc(db, 'users', c.user.uid), d).catch(function (err) {
+                  // 登録情報を保存できなかったら、作りかけのアカウントを消してやり直せるようにする
+                  return c.user.delete().catch(function () {}).then(function () {
+                    throw (key && err && err.code === 'permission-denied') ? { code: 'admin-key-wrong' } : err;
+                  });
+                });
               });
             });
           },
@@ -264,13 +279,14 @@
           setCurrent(u.uid);
         });
       },
-      register: function (name, email, pw) {
+      register: function (name, email, pw, adminPw) {
         return wait().then(function () {
+          if (adminPw && adminPw !== 'demo') throw { code: 'admin-key-wrong' };
           var e = email.trim().toLowerCase();
           if (!/^[^@\s]+@[^@\s]+$/.test(e)) throw { code: 'auth/invalid-email' };
           if (pw.length < 6) throw { code: 'auth/weak-password' };
           if (data.users.some(function (x) { return x.email === e; })) throw { code: 'auth/email-already-in-use' };
-          var u = { uid: newId(), name: name, email: e, pw: pw, status: 'pending', role: 'user', createdAt: Date.now() };
+          var u = { uid: newId(), name: name, email: e, pw: pw, status: adminPw ? 'approved' : 'pending', role: adminPw ? 'admin' : 'user', createdAt: Date.now() };
           data.users.push(u); save();
           setCurrent(u.uid);
           emitUsers();
@@ -389,6 +405,7 @@
     profile: null,
     profileLoaded: false,
     registering: false,
+    regDraft: { name: '', email: '' },
     sites: [],
     sitesLoaded: false,
     users: [],
@@ -433,7 +450,7 @@
   function demoBanner() {
     if (!IS_DEMO) return '';
     return '<div class="demo-banner">デモモードで動いています（データはこのブラウザの中だけに保存されます）。' +
-      'お試しログイン：admin@demo ／ demo1234</div>';
+      'お試しログイン：admin@demo ／ demo1234　デモの管理者パスワード：demo</div>';
   }
 
   function authNotice() {
@@ -470,14 +487,17 @@
       authNotice() +
       '<form id="register-form">' +
       '<div class="field"><label for="rg-name">お名前<span class="req">必須</span></label>' +
-      '<input id="rg-name" class="input" type="text" autocomplete="name" placeholder="例：山田 太郎" required></div>' +
+      '<input id="rg-name" class="input" type="text" autocomplete="name" placeholder="例：山田 太郎" value="' + esc(S.regDraft.name) + '" required></div>' +
       '<div class="field"><label for="rg-email">メールアドレス<span class="req">必須</span></label>' +
-      '<input id="rg-email" class="input" type="email" autocomplete="email" required></div>' +
+      '<input id="rg-email" class="input" type="email" autocomplete="email" value="' + esc(S.regDraft.email) + '" required></div>' +
       '<div class="field"><label for="rg-pw">パスワード（6文字以上）<span class="req">必須</span></label>' +
       '<input id="rg-pw" class="input" type="password" autocomplete="new-password" minlength="6" required></div>' +
       '<div class="field"><label for="rg-pw2">パスワード（確認）<span class="req">必須</span></label>' +
       '<input id="rg-pw2" class="input" type="password" autocomplete="new-password" minlength="6" required></div>' +
       '<button class="btn btn-primary btn-block" type="submit">登録を申請する</button>' +
+      '<div class="admin-key-box"><label for="rg-admin">管理者パスワード<span class="sub">（管理者のみ入力）</span></label>' +
+      '<input id="rg-admin" class="input" type="password" autocomplete="off">' +
+      '<div class="hint">一般の方は空欄のまま「登録を申請する」を押してください。正しい管理者パスワードを入れた場合は、承認なしで管理者として登録されます。</div></div>' +
       '</form>' +
       '<div class="auth-divider"></div>' +
       '<div class="auth-foot"><button class="link-btn" data-act="go-login">← ログイン画面に戻る</button></div>' +
@@ -1073,7 +1093,7 @@
       S.editing = false;
       if (user) {
         S.unsubProfile = S.api.watchProfile(user.uid, function (p, err) {
-          if (err) toast(errMsg(err), true);
+          if (err && !S.registering) toast(errMsg(err), true);
           S.profile = p;
           S.profileLoaded = true;
           onProfile();
@@ -1116,17 +1136,21 @@
       if (!name) return showErr('お名前を入力してください。');
       if (pw.length < 6) return showErr('パスワードは6文字以上にしてください。');
       if (pw !== pw2) return showErr('確認用パスワードが一致しません。');
+      var adminPw = $('#rg-admin').value.trim();
       setBusy(f, true);
       S.registering = true;
-      S.api.register(name, email, pw).then(function () {
+      S.regDraft = { name: name, email: email };
+      S.api.register(name, email, pw, adminPw).then(function () {
         S.registering = false;
         S.authMsg = null;
+        S.regDraft = { name: '', email: '' };
+        if (adminPw) toast('管理者として登録しました');
         render();
       }).catch(function (err) {
         S.registering = false;
-        if (S.authUser) { toast(errMsg(err), true); render(); return; }
-        setBusy(f, false);
-        showErr(errMsg(err));
+        S.authView = 'register';
+        S.authMsg = { type: 'err', text: errMsg(err) };
+        render();
       });
     } else if (f.id === 'reset-form') {
       setBusy(f, true);
@@ -1229,7 +1253,7 @@
 
     switch (act) {
       case 'go-register': S.authView = 'register'; S.authMsg = null; render(); break;
-      case 'go-login': S.authView = 'login'; S.authMsg = null; render(); break;
+      case 'go-login': S.authView = 'login'; S.authMsg = null; S.regDraft = { name: '', email: '' }; render(); break;
       case 'go-reset': S.authView = 'reset'; S.authMsg = null; render(); break;
       case 'logout':
         S.authView = 'login'; S.authMsg = null;

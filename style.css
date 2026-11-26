@@ -69,6 +69,9 @@ a { color: var(--primary); }
   background: #fff8e1; color: #8a5a00; border-bottom: 1px solid #f3dfa2;
   padding: 6px 16px; font-size: 13px; text-align: center;
 }
+.admin-key-box { margin-top: 18px; padding: 12px 14px; background: #f7f9fb; border: 1px solid var(--line); border-radius: 8px; }
+.admin-key-box label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 4px; color: #3b4652; }
+.admin-key-box .sub { font-weight: 400; color: var(--muted); margin-left: 4px; }
 .status-icon { font-size: 44px; text-align: center; margin-bottom: 8px; }
 
 /* ---------- フォーム ---------- */
