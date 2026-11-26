@@ -1,0 +1,26 @@
+rules_version = '2';
+// ============================================================
+//  ファイル置き場（Storage）のルール
+//  承認済みの利用者だけがファイルを見る・登録する・削除することができる
+// ============================================================
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function approved() {
+      return request.auth != null
+        && firestore.exists(/databases/(default)/documents/users/$(request.auth.uid))
+        && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.status == 'approved';
+    }
+
+    match /sites/{siteId}/{allPaths=**} {
+      allow read: if approved();
+      // 1ファイル100MBまで
+      allow create, update: if approved() && request.resource.size < 100 * 1024 * 1024;
+      allow delete: if approved();
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
